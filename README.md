@@ -1,1 +1,1 @@
-# modifiedSelectionRule
+# Cross validation for model selection
