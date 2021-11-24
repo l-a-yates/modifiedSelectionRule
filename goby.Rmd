@@ -28,11 +28,17 @@ knitr::opts_chunk$set(echo = TRUE, dev="png",
 
 ## Load data and specify models
 
-We follow the analysis of Bolker (2008, p227)...
+The Goby survival data set contains measurements from experimental manipulations on *Elacatinus evelynae* and *E. prochilos* in the US Virgin Islands, 2000-2002 [@Wilson2004]. The data are compiled from five experiments, $x = 1,2,...,5$, collected over three years, and include information on animal density $d$ and habitat quality $q$. The fraction of surviving Gobies $T(t)$ are modelled using the Weibull distribution; the aim of the analysis is to investigate the effect of density and habitat quality on mortality rate. Following the analysis of [@Bolker2008] (p276-283), we consider a set of 10 candidate models characterised by the dependence of the scale parameter $s$ on the variables $x$, $d$ and $q$. The most complex model, denoted ($\mbox{xqdi}$), is
 
-Our goal is to exemplify cross validation for model selection and the application of the modified one-standard-error (OSE) rule. 
+\begin{eqnarray*}
+    &&T \sim Weibull(a,s_x(d,q))\\[2mm]
+    &&s_x(d,q) = exp(\alpha_x + \beta q + (\gamma + \delta q)d), 
+\end{eqnarray*}
 
-The data is available from R package `emdbook`
+with $s$ depending on $x,q,d,$ and an interaction $i$, between $q$ and $d$. Models of lower complexity, with various dependencies omitted, are labelled in the same manner, together with ($\mbox{zero}$), which denotes the simplest model (a single shape and scale parameter). The data set contains 369 rows. 
+
+We load the data from the R package `emdbook` (with thanks to Jackie Wilson for giving permission for their use) and make a couple of small preparations  
+
 ```{r load data}
 library(emdbook)
 data(GobySurvival)
@@ -41,22 +47,35 @@ GobySurvival$day1 <-  GobySurvival$d1-1
 GobySurvival$day2 = ifelse(GobySurvival$d2==70,Inf,GobySurvival$d2-1)
 ```
 
-We load a script containing functions to specify, compute and (numerically) optimise the model likelihoods. 
+We load a script containing functions to specify, compute and (numerically) optimise the model likelihoods (see GitHub repo). 
 
 ```{r load goby functions}
 source("goby_functions.R")
+# nll.xqdi computes negative log-likelihood of the full model given data
+# nll.pred computes predictive negative log-likelihood for given fitted model and test data
+# fit.goby fits all 10 goby survival models using MLE, given data
+```
+For example, the function `nll.xqdi` returns the negative log-likelihood of the full model ($\mbox{xqdi}$):
+```{r}
+nll.xqdi
+```
+The function `fit.goby` specifies all 10 models (by fixing subset of the paramters to 0) and fits them using the numerical optimiser `bbmle::mle2`, returning a list of the fitted objects. For example, we use the function to fit all models to the full data set and print the fitted object for the ($\mbox{qd}$) model:
+```{r}
 m.fits <- fit.goby(GobySurvival)
+m.fits$qd 
+```
+For later use, it will be handy to have the models' names and dimensions
+```{r}
 m.dims <- sapply(m.fits, function(m) attr(logLik(m),"df"))
 m.names <- names(m.fits)
 ```
-
 
 ## Apply LOO 
 ```{r load loo, echo = FALSE}
 m.loo.pw <- readRDS("goby_loo.rds")
 ```
 
-To apply leave-one-out CV, we define ...
+To apply leave-one-out CV, we define the following function which uses `pbmclapply`---a parallel implementation of `lapply`---to compute the pointwise predictive log-likelihood (`nll.pred` function) for all 369 LOO data splits for all 10 models. Using 30 cores, computation time is reduced from 15 mins to just 30 secs (i.e., embarrassingly parallel).
 ```{r loo, eval=FALSE}
 MAX_CORES <- 30
 
@@ -93,9 +112,9 @@ To estimate the uncertainty and correlation of the loo estimates, we compute the
 goby.boot <- function(data, nboot){
   pbmclapply(1:nboot, function(i){
     fitted <- F
-    while (!fitted){
+    while (!fitted){ # use try within while in case a model fails to fit for a particular bootstrap sample 
       GS.boot = try(fit.goby(sample_n(data,nrow(data), replace = T)))
-      fitted = sum(sapply(GS.boot, is.character))==0
+      fitted = sum(sapply(GS.boot, is.character))==0  # test if GS.boot contains an error message
     }
     sapply(GS.boot, function(x) logLik(x)*-2)
   }, mc.cores = MAX_CORES) %>% sapply(identity) %>% t %>%  as_tibble
@@ -108,7 +127,7 @@ The tibble `m.boot` contains a column for each model and a row for each bootstra
 sample_n(m.boot,5)
 ```
 
-We use `m.boot` to compute both the standard errors and modified (i.e., corellation-adjusted) standard errors---there is a huge difference between the two due to significant correlation.
+We use `m.boot` to compute both the standard errors and modified (i.e., correlation-adjusted) standard errors---there is a huge difference between the two due to significant correlation.
 
 ```{r}
 se_ose <- m.boot %>% map_dbl(sd)
