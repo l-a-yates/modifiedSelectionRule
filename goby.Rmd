@@ -1,0 +1,139 @@
+---
+title: "Goby survival"
+author: "Luke Yates"
+date: "24/11/2021"
+bibliography: modSel.bib
+link-citations: true
+output: 
+  html_document:
+    number_sections: false
+    toc: false 
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(emdbook) # version 1.3.12 
+library(bbmle) # version 1.0.23.1
+library(pbmcapply)
+knitr::opts_chunk$set(echo = TRUE, dev="png", 
+               dev.args=list(type="cairo"),
+               dpi=96)
+```
+
+## Introduction
+
+## Load data and specify models
+
+We follow the analysis of Bolker (2008, p227)...
+
+Our goal is to exemplify cross validation for model selection and the application of the modified one-standard-error (OSE) rule. 
+
+The data is available from R package `emdbook`
+```{r load data}
+library(emdbook)
+data(GobySurvival)
+
+GobySurvival$day1 <-  GobySurvival$d1-1
+GobySurvival$day2 = ifelse(GobySurvival$d2==70,Inf,GobySurvival$d2-1)
+```
+
+We load a script containing functions to specify, compute and (numerically) optimise the model likelihoods. 
+
+```{r load goby functions}
+source("goby_functions.R")
+m.fits <- fit.goby(GobySurvival)
+m.dims <- sapply(m.fits, function(m) attr(logLik(m),"df"))
+m.names <- names(m.fits)
+```
+
+
+## Apply LOO 
+```{r load loo, echo = FALSE}
+m.loo.pw <- readRDS("goby_loo.rds")
+```
+
+To apply leave-one-out CV, we define ...
+```{r loo, eval=FALSE}
+MAX_CORES <- 30
+
+goby.loo <- function(data){
+  pbmclapply(1:nrow(data), function(i){ # parallel lapply
+    fit.train <- fit.goby(data[-i,]) # fits each model to training set
+    sapply(fit.train, function(m) nll.pred(m, data[i,]))*2 # predicts to test point
+  }, mc.cores = MAX_CORES) %>% sapply(identity) %>% t %>% as_tibble # combines lpo estimates
+}
+
+m.loo.pw <- goby.loo(GobySurvival) # 28 secs using 30 cores
+
+```
+The tibble `m.loo.pw` has a column for each model and a row for each data point
+```{r}
+sample_n(m.loo.pw,5)
+```
+
+An initial look at the loo scores shows that model `qd` has the lowest estimate
+```{r}
+m.loo <- m.loo.pw %>% map_dbl(sum) # sum over columns to get the loo score (deviance)
+m.min <- m.loo %>% which.min # store lowest-scoring model for later use
+m.loo %>% {.-min(.)} # delta scores
+```
+
+
+```{r, echo=FALSE}
+m.boot <- readRDS("goby_boot.rds")
+```
+## Applying the OSE rule
+
+To estimate the uncertainty and correlation of the loo estimates, we compute the deviance for a set of (non-parametric) bootstrap samples:
+```{r, eval = FALSE}
+goby.boot <- function(data, nboot){
+  pbmclapply(1:nboot, function(i){
+    fitted <- F
+    while (!fitted){
+      GS.boot = try(fit.goby(sample_n(data,nrow(data), replace = T)))
+      fitted = sum(sapply(GS.boot, is.character))==0
+    }
+    sapply(GS.boot, function(x) logLik(x)*-2)
+  }, mc.cores = MAX_CORES) %>% sapply(identity) %>% t %>%  as_tibble
+}
+
+m.boot <- goby.boot(GobySurvival, 1000) # 65 secs using 30 cores 
+```
+The tibble `m.boot` contains a column for each model and a row for each bootstrap sample
+```{r boot view}
+sample_n(m.boot,5)
+```
+
+We use `m.boot` to compute both the standard errors and modified (i.e., corellation-adjusted) standard errors---there is a huge difference between the two due to significant correlation.
+
+```{r}
+se_ose <- m.boot %>% map_dbl(sd)
+se_mod <- se_ose[m.min]*sqrt(1-cor(m.boot))[m.min,]
+se_ose; se_mod
+# se_ose[m.min]*sqrt(1-cor(m.loo*100))[m.min,]
+```
+To plot the results and apply the OSE rule, we make a summary table that can be passed to some pre-written plotting functions
+```{r summary table}
+
+# create model summary table
+summaryTable <- tibble(model = m.names, 
+                       dim = m.dims[model],
+                       score = m.loo[model],
+                       delScore = score - min(score),
+                       se_ose = se_ose[model],
+                       se_mod = se_mod[model]) %>% 
+                    arrange(dim) %>% 
+                    mutate(index = 1:length(dim))
+summaryTable
+```
+Finally, we can plot the resuls
+```{r OSE}
+source("OSE_functions.R")
+ggarrange(plotOSE(summaryTable), 
+          plotModifiedOSE(summaryTable), 
+          common.legend = T, legend = "bottom")
+```
